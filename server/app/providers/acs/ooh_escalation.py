@@ -108,6 +108,12 @@ _BY_CCID: dict[str, str] = {}         # call_connection_id -> calloutRef
 
 def _prompt(esc: _Esc) -> str:
     where = f" at {esc.site}" if esc.site else ""
+    # The final backstop rung gets a louder message — it means the callout fell
+    # all the way through the ladder without anyone accepting it.
+    if esc.ladder[esc.rung].get("role") == "backstop":
+        return (f"This is the Zen out of hours line. A callout{where} has NOT been "
+                f"accepted by any engineer. Press {ACCEPT_KEY} to take it, or hang up "
+                f"and it will stay unactioned.")
     return (f"This is the Zen out of hours line. A callout has come in{where}. "
             f"Press {ACCEPT_KEY} to accept it, or hang up and it will be passed on.")
 
