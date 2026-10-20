@@ -6,7 +6,7 @@ import json
 import logging
 
 from app.handler.voicelive_media_handler import DEFAULT_CHUNK_SIZE, VoiceLiveMediaHandler
-from . import ooh_capture, ooh_escalation
+from . import ooh_capture, ooh_escalation, ooh_recording
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,9 @@ class ACSMediaHandler(VoiceLiveMediaHandler):
     async def on_callout_raised(self, result: dict):
         ref = result.get("calloutRef") if isinstance(result, dict) else ""
         ooh_capture.set_callout_ref(ref)
+        # Bind this call's recording (started on CallConnected) to the callout ref,
+        # so the later recording-ready event can attach the audio to the right job.
+        ooh_recording.note_ref(ref)
         # Kick off the "keep ringing until answered + press 1 to accept" ladder in
         # the background so it never blocks the live call. Only when the callout
         # actually logged (ok + a reference to poll/accept against).

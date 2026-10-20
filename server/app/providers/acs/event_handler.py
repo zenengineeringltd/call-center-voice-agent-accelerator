@@ -14,7 +14,7 @@ from azure.communication.callautomation.aio import CallAutomationClient
 from azure.eventgrid import EventGridEvent, SystemEventNames
 from quart import Response
 
-from . import ooh_escalation
+from . import ooh_escalation, ooh_recording
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,19 @@ class AcsEventHandler:
                     response=json.dumps({"validationResponse": validation_code}),
                     status=200,
                 )
+
+            # The recording is finalised asynchronously after the call ends; ACS
+            # signals it with this Event Grid event (carries the downloadable
+            # contentLocation). Hand it to the recorder, which stores it and
+            # attaches a link to the callout. Needs an Event Grid subscription for
+            # this event type pointed at this endpoint (see the runbook).
+            if event.event_type == "Microsoft.Communication.RecordingFileStatusUpdated":
+                logger.info("Recording file ready: subject=%s", event.subject)
+                try:
+                    await ooh_recording.on_recording_ready(event_dict)
+                except Exception:
+                    logger.exception("ooh recording-ready handling failed")
+                return Response(status=200)
 
             if event.event_type == "Microsoft.Communication.IncomingCall":
                 logger.info("Incoming call received: data=%s", event.data)
@@ -135,6 +148,12 @@ class AcsEventHandler:
                     )
                     logger.info("CORRELATION ID:--> %s", event_data["correlationId"])
                     logger.info("CALL CONNECTION ID:--> %s", call_connection_id)
+
+                    # Record the OOH call. Only the inbound call reaches here —
+                    # the outbound escalation calls are intercepted above by
+                    # ooh_escalation.handle_callback_event (which `continue`s).
+                    # Best-effort: start() swallows its own errors.
+                    await ooh_recording.start(call_connection_id)
 
                 elif event["type"] == "Microsoft.Communication.MediaStreamingStarted":
                     update = event_data["mediaStreamingUpdate"]

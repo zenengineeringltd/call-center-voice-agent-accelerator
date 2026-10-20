@@ -25,6 +25,7 @@ dependencies = [
 acs = [
     "azure-communication-callautomation>=1.5.0",
     "azure-eventgrid>=4.22.0",
+    "azure-storage-blob>=12.19.0",
 ]
 twilio = [
     "twilio>=9.10.0",
