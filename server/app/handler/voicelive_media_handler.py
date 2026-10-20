@@ -56,7 +56,8 @@ RAISE_CALLOUT_TOOL = FunctionTool(
         "properties": {
             "issue": {"type": "string", "description": "What's wrong, in the caller's words."},
             "callbackNumber": {"type": "string", "description": "A phone number to call the caller back on."},
-            "site": {"type": "string", "description": "The site, company or address, as the caller gives it."},
+            "site": {"type": "string", "description": "The site, company or address NAME, as the caller gives it. Do NOT put the postcode here."},
+            "postcode": {"type": "string", "description": "The site postcode, captured as its own answer and read back to confirm (e.g. 'HG1 5DG'). Send it here, separate from the site name."},
             "callerName": {"type": "string", "description": "The caller's name."},
             "reference": {"type": "string", "description": "Any site/customer reference or account number, if given."},
             "urgencyNote": {"type": "string", "description": "Anything the caller says about how urgent it is."},
@@ -72,6 +73,7 @@ async def raise_callout(args: dict) -> dict:
         "issue": args.get("issue", ""),
         "callbackNumber": args.get("callbackNumber", ""),
         "site": args.get("site", ""),
+        "postcode": args.get("postcode", ""),
         "callerName": args.get("callerName", ""),
         "reference": args.get("reference", ""),
         "urgencyNote": args.get("urgencyNote", ""),
@@ -168,7 +170,9 @@ How to handle the call:
 - Speak in plain UK English. Be calm, brief and reassuring — the caller may be stressed. Ask one thing at a time.
 - Find out, roughly in this order:
   1. What's wrong — let them describe the fault in their own words.
-  2. The site — the building, company or address it's at. Ask for the site name AND its town or postcode (a postcode is easiest to get right). Read the site name back to confirm you've heard it correctly — if the caller corrects you, use their version. If you're unsure of the spelling, ask them to spell the key word.
+  2. The site — capture this in TWO separate questions, never as one run-on question:
+     (a) First ask only for the site name: "What's the name of the site or company?" Read the name back to confirm — if the caller corrects you, use their version; if you're unsure of the spelling, ask them to spell the key word. This goes in the `site` field.
+     (b) THEN, as its own separate question, ask only for the postcode: "And what's the postcode there?" Read the postcode back one character at a time to confirm — e.g. "that's H–G–1  5–D–G, is that right?" — and correct it if they say no. This goes in the `postcode` field, not in `site`. The postcode is the key we match the site on, so getting it exactly right matters more than the spoken name.
   3. A phone number to call them back on — read it back to confirm you've got it right.
   4. Their name.
   5. Any site or account reference they have (don't push if they don't).
