@@ -45,6 +45,15 @@ ACS_CONNECTION_STRING = os.getenv("ACS_CONNECTION_STRING", "")
 ACS_SOURCE_NUMBER     = os.getenv("ACS_SOURCE_NUMBER", "")
 PUBLIC_BASE_URL       = os.getenv("OOH_PUBLIC_BASE_URL", os.getenv("ACS_DEV_TUNNEL", "")).rstrip("/")
 VOICE                 = os.getenv("OOH_TTS_VOICE", "en-GB-SoniaNeural")
+# The Azure AI (Cognitive Services) endpoint ACS uses to SPEAK the prompt. It MUST
+# be attached when the call is created — ACS refuses a later TTS/recognize with
+# error 8522 ("Cognitive Service Configuration not set during call setup")
+# otherwise. Defaults to the same AI resource the agent already uses
+# (AZURE_VOICE_LIVE_ENDPOINT). ACS reaches it with ITS OWN managed identity, so
+# that identity needs the Cognitive Services User role on the resource.
+COGNITIVE_SERVICES_ENDPOINT = (os.getenv("OOH_COGNITIVE_SERVICES_ENDPOINT")
+                               or os.getenv("AZURE_VOICE_LIVE_ENDPOINT")
+                               or "").rstrip("/")
 
 ZENCORE_OOH_STATUS_URL = os.getenv("ZENCORE_OOH_STATUS_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-status")
 ZENCORE_OOH_ACCEPT_URL = os.getenv("ZENCORE_OOH_ACCEPT_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-accept")
@@ -151,12 +160,20 @@ async def _dial(esc: _Esc) -> None:
         # SDK 1.5.0: the target is a CommunicationIdentifier directly (no
         # CallInvite), the caller id is a keyword, and create_call returns a
         # CallConnectionProperties (so the id is .call_connection_id, not nested).
-        result = await _acs().create_call(
+        # Attach the Cognitive Services endpoint AT SETUP so the spoken prompt /
+        # DTMF recognise is allowed later (ACS error 8522 otherwise).
+        call_kwargs = dict(
             target_participant=PhoneNumberIdentifier(target["number"]),
             callback_url=cb_url,
             source_caller_id_number=PhoneNumberIdentifier(ACS_SOURCE_NUMBER),
             operation_context=f"ooh:{esc.ref}:{esc.rung}",
         )
+        if COGNITIVE_SERVICES_ENDPOINT:
+            call_kwargs["cognitive_services_endpoint"] = COGNITIVE_SERVICES_ENDPOINT
+        else:
+            logger.warning("ooh %s: no Cognitive Services endpoint set — the spoken "
+                           "prompt will be refused (error 8522)", esc.ref)
+        result = await _acs().create_call(**call_kwargs)
         esc.ccid = result.call_connection_id
         _BY_CCID[esc.ccid] = esc.ref
         esc.awaiting = True
