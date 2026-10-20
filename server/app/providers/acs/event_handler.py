@@ -14,6 +14,8 @@ from azure.communication.callautomation.aio import CallAutomationClient
 from azure.eventgrid import EventGridEvent, SystemEventNames
 from quart import Response
 
+from . import ooh_escalation
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +104,12 @@ class AcsEventHandler:
         """Processes ACS callback events such as call connected, media started, etc."""
         for event in raw_events:
             try:
+                # OOH escalation owns the callbacks for the outbound "keep ringing"
+                # calls it places. If this event belongs to one of those, it has
+                # handled it (play the prompt / read the keypress / redial) and we
+                # skip the inbound-call handling below.
+                if await ooh_escalation.handle_callback_event(event):
+                    continue
                 event_data = event["data"]
                 call_connection_id = event_data["callConnectionId"]
 

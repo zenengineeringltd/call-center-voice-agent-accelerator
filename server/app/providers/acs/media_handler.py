@@ -1,11 +1,12 @@
 """Handles ACS (Azure Communication Services) clients via JSON-wrapped audio."""
 
+import asyncio
 import base64
 import json
 import logging
 
 from app.handler.voicelive_media_handler import DEFAULT_CHUNK_SIZE, VoiceLiveMediaHandler
-from . import ooh_capture
+from . import ooh_capture, ooh_escalation
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,13 @@ class ACSMediaHandler(VoiceLiveMediaHandler):
         ooh_capture.add_agent(transcript)
 
     async def on_callout_raised(self, result: dict):
-        ooh_capture.set_callout_ref(result.get("calloutRef") if isinstance(result, dict) else "")
+        ref = result.get("calloutRef") if isinstance(result, dict) else ""
+        ooh_capture.set_callout_ref(ref)
+        # Kick off the "keep ringing until answered + press 1 to accept" ladder in
+        # the background so it never blocks the live call. Only when the callout
+        # actually logged (ok + a reference to poll/accept against).
+        if isinstance(result, dict) and result.get("ok") and ref:
+            asyncio.create_task(ooh_escalation.start(ref))
 
     async def cleanup(self):
         try:
