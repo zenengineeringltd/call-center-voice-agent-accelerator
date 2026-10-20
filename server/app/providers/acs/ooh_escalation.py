@@ -55,9 +55,10 @@ COGNITIVE_SERVICES_ENDPOINT = (os.getenv("OOH_COGNITIVE_SERVICES_ENDPOINT")
                                or os.getenv("AZURE_VOICE_LIVE_ENDPOINT")
                                or "").rstrip("/")
 
-ZENCORE_OOH_STATUS_URL = os.getenv("ZENCORE_OOH_STATUS_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-status")
-ZENCORE_OOH_ACCEPT_URL = os.getenv("ZENCORE_OOH_ACCEPT_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-accept")
-OOH_INGEST_KEY         = os.getenv("OOH_INGEST_KEY", "")
+ZENCORE_OOH_STATUS_URL  = os.getenv("ZENCORE_OOH_STATUS_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-status")
+ZENCORE_OOH_ACCEPT_URL  = os.getenv("ZENCORE_OOH_ACCEPT_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-accept")
+ZENCORE_OOH_ATTEMPT_URL = os.getenv("ZENCORE_OOH_ATTEMPT_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-attempt")
+OOH_INGEST_KEY          = os.getenv("OOH_INGEST_KEY", "")
 
 # Per rung: try up to 6 times, 10 minutes apart, before dropping to the next
 # contact on the ladder (on-call engineer -> Technical Manager -> …). So each
@@ -88,6 +89,29 @@ async def _zc_accept(ref: str, by: str = "") -> dict:
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
         async with s.post(ZENCORE_OOH_ACCEPT_URL, json={"calloutRef": ref, "by": by}, headers=headers) as r:
             return await r.json()
+
+
+async def _zc_attempt(esc: "_Esc", outcome: str) -> None:
+    """Log this rung's dial outcome to ZenCore (accepted | no_answer | failed) so
+    the office can see who was tried and chase non-responders. Best-effort: must
+    be reported BEFORE _advance changes the rung, and never raises."""
+    rung = esc.ladder[esc.rung] if 0 <= esc.rung < len(esc.ladder) else {}
+    body = {
+        "calloutRef": esc.ref,
+        "outcome": outcome,
+        "rung": esc.rung,
+        "role": rung.get("role", ""),
+        "name": rung.get("name", ""),
+        "number": rung.get("number", ""),
+    }
+    headers = {"x-ooh-key": OOH_INGEST_KEY, "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.post(ZENCORE_OOH_ATTEMPT_URL, json=body, headers=headers) as r:
+                if r.status >= 300:
+                    logger.warning("ooh attempt POST %s -> %s", esc.ref, r.status)
+    except Exception as e:                           # noqa: BLE001
+        logger.warning("ooh attempt POST failed for %s: %s", esc.ref, e)
 
 
 class _Esc:
@@ -232,6 +256,7 @@ async def handle_callback_event(event: dict) -> bool:
                 await _zc_accept(esc.ref, by=who)
             except Exception as e:                 # noqa: BLE001
                 logger.warning("ooh %s: accept POST failed: %s", esc.ref, e)
+            await _zc_attempt(esc, "accepted")
             try:
                 await conn.play_media_to_all(TextSource(text="Thanks, that's booked to you. Goodbye.", voice_name=VOICE))
             except Exception:                      # noqa: BLE001
@@ -255,12 +280,14 @@ async def handle_callback_event(event: dict) -> bool:
                        esc.ref, esc.rung, info.get("code"), info.get("subCode"), info.get("message"))
         esc.awaiting = False
         _BY_CCID.pop(ccid, None)
+        await _zc_attempt(esc, "failed")
         await _advance(esc)
 
     elif etype == "CallDisconnected":
         if esc.awaiting:
             esc.awaiting = False
             _BY_CCID.pop(ccid, None)
+            await _zc_attempt(esc, "no_answer")
             await _advance(esc)
 
     return True
@@ -272,6 +299,7 @@ async def _end_attempt(esc: _Esc, conn, accepted: bool) -> None:
     if esc.ccid:
         _BY_CCID.pop(esc.ccid, None)
     if not accepted:
+        await _zc_attempt(esc, "no_answer")
         await _advance(esc)
 
 
