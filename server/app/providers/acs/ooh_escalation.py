@@ -59,8 +59,11 @@ ZENCORE_OOH_STATUS_URL = os.getenv("ZENCORE_OOH_STATUS_URL", "https://zencore.ze
 ZENCORE_OOH_ACCEPT_URL = os.getenv("ZENCORE_OOH_ACCEPT_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout-accept")
 OOH_INGEST_KEY         = os.getenv("OOH_INGEST_KEY", "")
 
-MAX_ATTEMPTS_PER_RUNG = int(os.getenv("OOH_MAX_ATTEMPTS_PER_RUNG", "2"))
-REDIAL_DELAY_SECONDS  = int(os.getenv("OOH_REDIAL_DELAY_SECONDS", "20"))
+# Per rung: try up to 6 times, 10 minutes apart, before dropping to the next
+# contact on the ladder (on-call engineer -> Technical Manager -> …). So each
+# person gets ~1 hour of nudging before it moves on. Overridable per deployment.
+MAX_ATTEMPTS_PER_RUNG = int(os.getenv("OOH_MAX_ATTEMPTS_PER_RUNG", "6"))
+REDIAL_DELAY_SECONDS  = int(os.getenv("OOH_REDIAL_DELAY_SECONDS", "600"))
 ACCEPT_KEY            = os.getenv("OOH_ACCEPT_KEY", "1")
 
 _client: CallAutomationClient | None = None
