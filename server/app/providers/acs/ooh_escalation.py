@@ -114,7 +114,16 @@ async def start(callout_ref: str) -> None:
         return
     if status.get("acknowledged"):
         return
-    ladder = [c for c in status.get("escalation", []) if c.get("number")]
+    # Normalise every number to E.164 (+44…) up front. ACS create_call can't
+    # route a number stored as 07… or with spaces, and fails the call — so a
+    # number saved in national form is exactly the "ringing rung 0 then
+    # CreateCallFailed" symptom. _e164 fixes the common UK forms; a number it
+    # can't fix is dropped rather than dialled into a guaranteed failure.
+    ladder = []
+    for c in status.get("escalation", []):
+        num = _e164(c.get("number"))
+        if num:
+            ladder.append({**c, "number": num})
     if not ladder:
         logger.warning("ooh %s: empty ladder — office already emailed", callout_ref)
         return
@@ -210,6 +219,18 @@ async def handle_callback_event(event: dict) -> bool:
     elif etype in ("RecognizeFailed", "PlayFailed"):
         await _end_attempt(esc, conn, accepted=False)
 
+    elif etype == "CreateCallFailed":
+        # The outbound call never connected (bad/unroutable number, or the source
+        # number isn't allowed to dial this destination). Log ACS's own reason so
+        # a persistent failure is diagnosable, then treat it as a failed attempt
+        # and move on rather than leaving the ladder hung.
+        info = data.get("resultInformation") or {}
+        logger.warning("ooh %s: CreateCallFailed rung %d code=%s subCode=%s message=%s",
+                       esc.ref, esc.rung, info.get("code"), info.get("subCode"), info.get("message"))
+        esc.awaiting = False
+        _BY_CCID.pop(ccid, None)
+        await _advance(esc)
+
     elif etype == "CallDisconnected":
         if esc.awaiting:
             esc.awaiting = False
@@ -256,3 +277,24 @@ async def _hang_up(conn) -> None:
 def _tone_word(digit: str) -> str:
     return {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
             "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}.get(digit, digit)
+
+
+def _e164(number: str) -> str:
+    """Best-effort UK E.164 normalisation. ACS needs +44…; a number stored as
+    07… or with spaces/brackets won't route and create_call fails. Keeps an
+    already-+ number as-is, maps 0044/44/0 prefixes to +44, and returns "" for
+    anything left that clearly isn't a dialable number."""
+    raw = str(number or "").strip()
+    n = "+" + "".join(ch for ch in raw if ch.isdigit()) if raw.startswith("+") \
+        else "".join(ch for ch in raw if ch.isdigit())
+    if not n or n == "+":
+        return ""
+    if n.startswith("+"):
+        return n
+    if n.startswith("0044"):
+        return "+" + n[2:]
+    if n.startswith("44"):
+        return "+" + n
+    if n.startswith("0"):
+        return "+44" + n[1:]
+    return n
