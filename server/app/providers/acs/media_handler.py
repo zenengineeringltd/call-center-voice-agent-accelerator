@@ -5,6 +5,7 @@ import json
 import logging
 
 from app.handler.voicelive_media_handler import DEFAULT_CHUNK_SIZE, VoiceLiveMediaHandler
+from . import ooh_capture
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,26 @@ class ACSMediaHandler(VoiceLiveMediaHandler):
     Overrides only the JSON wrapping/unwrapping; ambient mixing and Voice Live
     connection are inherited from the base class.
     """
+    def __init__(self, config):
+        super().__init__(config)
+        ooh_capture.reset()          # fresh capture state for this call
 
+    async def on_user_transcript(self, transcript: str):
+        ooh_capture.add_caller(transcript)
+
+    async def on_transcript_done(self, transcript: str):
+        await super().on_transcript_done(transcript)
+        ooh_capture.add_agent(transcript)
+
+    async def on_callout_raised(self, result: dict):
+        ooh_capture.set_callout_ref(result.get("calloutRef") if isinstance(result, dict) else "")
+
+    async def cleanup(self):
+        try:
+            await ooh_capture.flush_transcript()
+        except Exception:
+            logger.exception("[ACSMediaHandler] transcript flush failed")
+        await super().cleanup()
     # ------------------------------------------------------------------
     # Audio output — wrap in ACS JSON protocol
     # ------------------------------------------------------------------

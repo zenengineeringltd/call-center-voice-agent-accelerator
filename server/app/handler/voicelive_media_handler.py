@@ -10,6 +10,9 @@ import base64
 import json
 import logging
 import time
+import os
+import aiohttp
+from datetime import datetime, timezone
 from typing import Optional, Union
 
 import numpy as np
@@ -26,6 +29,9 @@ from azure.ai.voicelive.models import (
     OutputAudioFormat,
     RequestSession,
     ServerEventType,
+    FunctionTool,
+    FunctionCallOutputItem,
+    ToolChoiceLiteral,
 )
 
 from .ambient_mixer import AmbientMixer
@@ -39,8 +45,51 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHUNK_SIZE = 4800  # 24000 samples/sec * 0.1 sec * 2 bytes
 
 
+ZENCORE_OOH_URL = os.getenv("ZENCORE_OOH_URL", "https://zencore.zenengineering.co.uk/api/ooh-callout")
+OOH_INGEST_KEY = os.getenv("OOH_INGEST_KEY", "")
+
+RAISE_CALLOUT_TOOL = FunctionTool(
+    name="raise_callout",
+    description="Log an out-of-hours callout into ZenCore and alert the on-call engineer. Call this once you have what's wrong and a phone number to reach the caller on.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "issue": {"type": "string", "description": "What's wrong, in the caller's words."},
+            "callbackNumber": {"type": "string", "description": "A phone number to call the caller back on."},
+            "site": {"type": "string", "description": "The site, company or address, as the caller gives it."},
+            "callerName": {"type": "string", "description": "The caller's name."},
+            "reference": {"type": "string", "description": "Any site/customer reference or account number, if given."},
+            "urgencyNote": {"type": "string", "description": "Anything the caller says about how urgent it is."},
+        },
+        "required": ["issue", "callbackNumber"],
+    },
+)
+
+
+async def raise_callout(args: dict) -> dict:
+    """POST the captured callout to ZenCore. Never raises — returns a dict."""
+    payload = {
+        "issue": args.get("issue", ""),
+        "callbackNumber": args.get("callbackNumber", ""),
+        "site": args.get("site", ""),
+        "callerName": args.get("callerName", ""),
+        "reference": args.get("reference", ""),
+        "urgencyNote": args.get("urgencyNote", ""),
+        "callStartedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    headers = {"x-ooh-key": OOH_INGEST_KEY, "Content-Type": "application/json"}
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.post(ZENCORE_OOH_URL, json=payload, headers=headers) as r:
+                data = await r.json()
+                return data if isinstance(data, dict) else {"ok": False}
+    except Exception as e:
+        logger.error("raise_callout failed: %s", e)
+        return {"ok": False, "error": str(e)}
+    
 class VoiceLiveMediaHandler:
-    """Handles the connection to Azure Voice Live API and web clients.
+    """"Handles the connection to Azure Voice Live API and web clients.
 
     Uses the azure-ai-voicelive SDK for typed session config, event handling,
     and audio streaming. Provides web client audio handling (raw PCM + ambient
@@ -50,7 +99,7 @@ class VoiceLiveMediaHandler:
 
     def __init__(self, config):
         self.endpoint = config["AZURE_VOICE_LIVE_ENDPOINT"]
-        self.model = config["VOICE_LIVE_MODEL"]
+        self.model = config["VOICE_LIVE_MODEL"]    
         self.api_key = config["AZURE_VOICE_LIVE_API_KEY"]
         self.client_id = config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"]
 
@@ -88,17 +137,58 @@ class VoiceLiveMediaHandler:
             except Exception as e:
                 logger.error(f"Failed to initialize AmbientMixer: {e}")
 
+    async def _handle_raise_callout(self, event):
+        try:
+            args = json.loads(event.arguments or "{}")
+        except Exception:
+            args = {}
+        result = await raise_callout(args)
+        await self.on_callout_raised(result)
+        model_output = {
+            "ok": bool(result.get("ok")),
+            "reference": result.get("calloutRef"),
+            "status": ("Callout logged and the on-call engineer has been alerted."
+                       if result.get("ok") else
+                       "Could not log automatically; reassure the caller and an engineer will be contacted."),
+        }
+        item = FunctionCallOutputItem(call_id=event.call_id, output=json.dumps(model_output))
+        await self.conn.conversation.item.create(item=item)
+        await self.conn.response.create()
+
     def _session_config(self) -> RequestSession:
         """Return the typed session configuration for Voice Live."""
         return RequestSession(
             modalities=[Modality.TEXT, Modality.AUDIO],
-            instructions="You are a helpful AI assistant responding in natural, engaging language.",
+            instructions="""You are the out-of-hours telephone assistant for Zen Engineering, a fire and security systems maintenance company. Callers reach you outside office hours because something has gone wrong on a site we look after — a fire alarm, intruder alarm, access control, emergency lighting or similar — and they need an engineer.
+
+Your job is simple: answer warmly, find out what's wrong and how to reach them, and log the callout. You do NOT decide whether it's urgent, and you never ask them to wait until morning — every call is passed to the on-call engineer.
+
+How to handle the call:
+- Open with: "You've reached Zen Engineering's out-of-hours line. Can I take some details and get an engineer onto it?"
+- Speak in plain UK English. Be calm, brief and reassuring — the caller may be stressed. Ask one thing at a time.
+- Find out, roughly in this order:
+  1. What's wrong — let them describe the fault in their own words.
+  2. The site — the building, company or address it's at. Ask for the site name AND its town or postcode (a postcode is easiest to get right). Read the site name back to confirm you've heard it correctly — if the caller corrects you, use their version. If you're unsure of the spelling, ask them to spell the key word.
+  3. A phone number to call them back on — read it back to confirm you've got it right.
+  4. Their name.
+  5. Any site or account reference they have (don't push if they don't).
+- Once you have at least what's wrong and a callback number, call the raise_callout tool with the details.
+- After the tool confirms, tell them it's logged, the on-call engineer has been alerted, and will call them back shortly on the number they gave. Do NOT promise a specific arrival time.
+- Ask if there's anything else, then close politely.
+
+Important rules:
+- If the caller describes an actual fire, smoke, a gas leak, or anyone hurt or in danger, tell them immediately to hang up and dial 999 — then still log it for the engineer. Life safety comes first.
+- Don't give technical advice or talk them through fixing anything — just capture and pass it on.
+- Don't make anything up. If something's unclear, ask a short follow-up. If they genuinely can't give a callback number, still log the call with what you have.
+- Keep it short — you're taking a message and reassuring them an engineer is coming, not having a long chat.""",
+            tools=[RAISE_CALLOUT_TOOL],
+            tool_choice=ToolChoiceLiteral.AUTO,
             turn_detection=AzureSemanticVad(),
             input_audio_format=self.input_audio_format,
             output_audio_format=self.output_audio_format,
             input_audio_noise_reduction=AudioNoiseReduction(type="azure_deep_noise_suppression"),
             input_audio_echo_cancellation=AudioEchoCancellation(),
-            voice=AzureStandardVoice(name="en-US-Aria:DragonHDLatestNeural", temperature=0.8),
+            voice=AzureStandardVoice(name="en-GB-SoniaNeural", temperature=0.8),
         )
 
     # ------------------------------------------------------------------
@@ -175,6 +265,7 @@ class VoiceLiveMediaHandler:
                     case ServerEventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED:
                         transcript = event.transcript
                         logger.debug("[VoiceLive] User: %s", transcript)
+                        await self.on_user_transcript(transcript)
 
                     case ServerEventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_FAILED:
                         logger.warning(
@@ -208,6 +299,8 @@ class VoiceLiveMediaHandler:
                     case ServerEventType.ERROR:
                         logger.error("[VoiceLive] Error: %s", event.error)
 
+                    case ServerEventType.RESPONSE_FUNCTION_CALL_ARGUMENTS_DONE:
+                        await self._handle_raise_callout(event)
                     case _:
                         logger.debug("[VoiceLive] Event: %s", event_type)
         except asyncio.CancelledError:
@@ -280,6 +373,15 @@ class VoiceLiveMediaHandler:
 
     async def on_response_done(self):
         """Called when Voice Live finishes a response. No-op by default."""
+        pass
+    async def on_user_transcript(self, transcript: str):
+        """A completed caller transcript line. No-op by default; the OOH ACS
+        handler overrides this to capture it."""
+        pass
+
+    async def on_callout_raised(self, result: dict):
+        """Called right after raise_callout files a callout (result carries
+        calloutRef). No-op by default; the OOH ACS handler overrides this."""
         pass
 
     # ------------------------------------------------------------------
