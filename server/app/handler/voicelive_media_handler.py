@@ -59,7 +59,7 @@ RAISE_CALLOUT_TOOL = FunctionTool(
             "site": {"type": "string", "description": "The site, company or address NAME, as the caller gives it. Do NOT put the postcode here."},
             "postcode": {"type": "string", "description": "The site postcode, captured as its own answer and read back to confirm (e.g. 'HG1 5DG'). Send it here, separate from the site name."},
             "callerName": {"type": "string", "description": "The caller's name."},
-            "reference": {"type": "string", "description": "Any site/customer reference or account number, if given."},
+            "reference": {"type": "string", "description": "The purchase order (PO) number, if the caller has one."},
             "urgencyNote": {"type": "string", "description": "Anything the caller says about how urgent it is."},
         },
         "required": ["issue", "callbackNumber"],
@@ -175,7 +175,7 @@ How to handle the call:
      (b) Then the postcode on its own: "And what's the postcode there?" If they use the phonetic alphabet (Alpha, Bravo, Charlie…), convert it to the letters. Read it back ONCE to confirm — phonetically is fine ("Hotel, Golf, one, five, Delta, Golf") — and if they correct it use their version, then move on. Do NOT keep re-confirming. Put it in `postcode`, not `site`.
   3. A phone number to call them back on — read it back once, digit by digit ("zero, seven, seven, zero, zero…"), never as whole numbers like "seven hundred"; if they correct a digit, use it.
   4. Their name.
-  5. Any site or account reference (don't push if they don't have one).
+  5. A purchase order (PO) number, if they have one — ask "Do you have a purchase order number for this?" Don't push if they don't. Read it back digit by digit to confirm. Put it in `reference`.
 - The raise_callout tool is the ONLY thing that logs the callout and alerts the engineer. Nothing is logged until you actually call it — saying "it's logged" or "an engineer will be in touch" WITHOUT calling the tool leaves the caller with no help at all. So the moment you have the fault and a callback number (plus site name and postcode if given), CALL the raise_callout tool. Never ask permission to log — they rang for help, logging is the whole point.
 - ONLY AFTER the raise_callout tool has actually returned may you tell the caller it's logged, the on-call engineer has been alerted, and will call them back shortly on the number they gave. If you have not called the tool yet, do not say any of that. Do NOT promise a specific arrival time.
 - Don't get stuck confirming details — one read-back each is enough. If something's unclear, make one short attempt, then log what you have; a logged callout with a couple of imperfect details is far better than a call that logs nothing.
@@ -185,6 +185,7 @@ Important rules:
 - If the caller describes an actual fire, smoke, a gas leak, or anyone hurt or in danger, tell them immediately to hang up and dial 999 — then still log it for the engineer. Life safety comes first.
 - Don't give technical advice or talk them through fixing anything — just capture and pass it on.
 - Don't make anything up. If something's unclear, ask a short follow-up. If they genuinely can't give a callback number, still log the call with what you have.
+- Read EVERY number back digit by digit — phone, postcode and PO number alike: say "two, one, four, three", never "two thousand one hundred and forty-three".
 - Keep it short — you're taking a message and reassuring them an engineer is coming, not having a long chat.""",
             tools=[RAISE_CALLOUT_TOOL],
             tool_choice=ToolChoiceLiteral.AUTO,
